@@ -7,20 +7,20 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.distributions import MultivariateNormal
-from torch.utils.data import TensorDataset, DataLoader, Dataset
 
-from data_generator.characteristics import generar_matriz
-from network import FeedForwardNN, OrderedOutputNN, DecisionNN
-from circeENV import TheusEnv
-
-from gymnasium.wrappers import FlattenObservation
+import logging
 
 
 class PPO:
 	"""
 		This is the PPO class we will use as our model in main.py
 	"""
-	def __init__(self, policy_class, critic_class, decision_class, env, **hyperparameters):
+	def __init__(self, policy_class,
+				 critic_class,
+				 decision_class,
+				 class_dim,
+				 env,
+				 **hyperparameters):
 		"""
 			Initializes the PPO model, including hyperparameters.
 
@@ -35,7 +35,7 @@ class PPO:
 		# Make sure the environment is compatible with our code
 		#assert (type(env.observation_space) == gym.spaces.Box)
 		#assert (type(env.action_space) == gym.spaces.Box)
-		assert(type(env.observation_space) == gym.spaces.dict.Dict)
+		assert(type(env.observation_space) == gym.spaces.Box)
 		assert(type(env.action_space) == gym.spaces.dict.Dict)
 
 		# Initialize hyperparameters for training with PPO
@@ -45,22 +45,26 @@ class PPO:
 		self.env = env
 		#self.obs_dim = env.observation_space.shape[0]
 		#self.act_dim = env.action_space.shape[0]
-		self.obs_dim = env.observation_space['Accuracy'].shape[0]
+		self.obs_dim = env.observation_space.shape[0]
 		self.act_dim = env.action_space['p1'].shape[0]
 
 		# Initialize actor and critic networks
 		self.actor = policy_class(self.obs_dim, self.act_dim)                                                   # ALG STEP 1
 		self.critic = critic_class(self.obs_dim, 1)
-		# Añadimos el actdim por la dimensión de un elemento del batch
-		self.decision_actor = decision_class(self.obs_dim + self.act_dim)
+
+		# Initialize decision network for clasification
+		self.class_dim = class_dim
+		self.decision_actor = decision_class(self.obs_dim, self.class_dim)
 
 		# Initialize optimizers for actor and critic
 		self.actor_optim = Adam(self.actor.parameters(), lr=self.lr)
 		self.critic_optim = Adam(self.critic.parameters(), lr=self.lr)
-		self.decision_optim = Adam(self.decision_actor.parameters(), lr=self.lr)
+
+		# Initialize optimizer for decision actor
+		self.decision_actor_optim = Adam(self.decision_actor.parameters(), lr=self.decision_lr)
 
 		# Initialize the covariance matrix used to query the actor for actions
-		self.cov_var = torch.full(size=(3*self.act_dim,), fill_value=0.5)
+		self.cov_var = torch.full(size=(3*self.act_dim,), fill_value=0.005)
 		self.cov_mat = torch.diag(self.cov_var)
 
 		# This logger will help us with printing out summaries of each iteration
@@ -71,6 +75,7 @@ class PPO:
 			'batch_lens': [],       # episodic lengths in batch
 			'batch_rews': [],       # episodic returns in batch
 			'actor_losses': [],     # losses of actor network in current iteration
+			'decision_actor_losses': [],	# losses for the decision network
 		}
 
 	def learn(self, total_timesteps):
@@ -89,7 +94,14 @@ class PPO:
 		i_so_far = 0 # Iterations ran so far
 		while t_so_far < total_timesteps:                                                                       # ALG STEP 2
 			# Autobots, roll out (just kidding, we're collecting our batch simulations here)
-			batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()                     # ALG STEP 3
+			(batch_obs,
+			 batch_acts,
+			 batch_log_probs,
+			 batch_rtgs,
+			 batch_lens,
+			 batch_rews_decision,
+			 batch_membership,
+			 batch_labels) = self.rollout()                     # ALG STEP 3
 
 			# Calculate how many timesteps we collected this batch
 			t_so_far += np.sum(batch_lens)
@@ -103,7 +115,7 @@ class PPO:
 
 			# Calculate advantage at k-th iteration
 			V, _ = self.evaluate(batch_obs, batch_acts)
-			A_k = batch_rtgs - V.detach()                                                                       # ALG STEP 5
+			A_k = batch_rtgs - V.detach()
 
 			# One of the only tricks I use that isn't in the pseudocode. Normalizing advantages
 			# isn't theoretically necessary, but in practice it decreases the variance of
@@ -129,12 +141,18 @@ class PPO:
 				surr1 = ratios * A_k
 				surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * A_k
 
+				# Calculate the decision error
+				output = self.decision_actor(batch_membership)
+
 				# Calculate actor and critic losses.
 				# NOTE: we take the negative min of the surrogate losses because we're trying to maximize
 				# the performance function, but Adam minimizes the loss. So minimizing the negative
 				# performance function maximizes it.
 				actor_loss = (-torch.min(surr1, surr2)).mean()
 				critic_loss = nn.MSELoss()(V, batch_rtgs)
+
+				# Calculate decision actor loss
+				decision_actor_loss = nn.CrossEntropyLoss()(output, batch_labels)
 
 				# Calculate gradients and perform backward propagation for actor network
 				self.actor_optim.zero_grad()
@@ -143,11 +161,17 @@ class PPO:
 
 				# Calculate gradients and perform backward propagation for critic network
 				self.critic_optim.zero_grad()
-				critic_loss.backward()
+				critic_loss.backward(retain_graph=True)
 				self.critic_optim.step()
+
+				# Calculate gradients and perform backward propagation for decision actor network
+				self.decision_actor_optim.zero_grad()
+				decision_actor_loss.backward()
+				self.decision_actor_optim.step()
 
 				# Log actor loss
 				self.logger['actor_losses'].append(actor_loss.detach())
+				self.logger['decision_actor_losses'].append(decision_actor_loss.detach())
 
 			# Print a summary of our training so far
 			self._log_summary()
@@ -178,8 +202,13 @@ class PPO:
 		batch_acts = []
 		batch_log_probs = []
 		batch_rews = []
+		batch_rews_decision = []
 		batch_rtgs = []
 		batch_lens = []
+		batch_membership = []
+		batch_labels = []
+
+		self.env.unwrapped.init_rollout() # Inicializamos batch de los datos de entrenamiento
 
 		# Episodic data. Keeps track of rewards per episode, will get cleared
 		# upon each new episode
@@ -190,6 +219,7 @@ class PPO:
 		# Keep simulating until we've run more than or equal to specified timesteps per batch
 		while t < self.timesteps_per_batch:
 			ep_rews = [] # rewards collected per episode
+			ep_rews_decision = []
 
 			# Reset the environment. sNote that obs is short for observation.
 			obs, _ = self.env.reset()
@@ -206,21 +236,26 @@ class PPO:
 				# Track observations in this batch
 				batch_obs.append(obs)
 
+				labels = self.env.unwrapped.get_labels().detach().numpy()
+
 				# Calculate action and make a step in the env.
 				# Note that rew is short for reward.
 				action, log_prob = self.get_action(obs)
-				env.p1 = action[0:self.act_dim]
-				env.p2 = action[self.act_dim: 2*self.act_dim]
-				env.p3 = action[2*self.act_dim: 3 * self.act_dim]
 				obs, rew, terminated, truncated, _ = self.env.step(action)
+
+				membership = self.env.unwrapped.get_membership()
+				rew_decision = self.decision_actor(membership).detach().numpy()
 
 				# Don't really care about the difference between terminated or truncated in this, so just combine them
 				done = terminated | truncated
 
 				# Track recent reward, action, and action log probability
 				ep_rews.append(rew)
+				ep_rews_decision.append(rew_decision)
 				batch_acts.append(action)
 				batch_log_probs.append(log_prob)
+				batch_membership.append(membership)
+				batch_labels.append(labels)
 
 				# If the environment tells us the episode is terminated, break
 				if done:
@@ -229,18 +264,30 @@ class PPO:
 			# Track episodic lengths and rewards
 			batch_lens.append(ep_t + 1)
 			batch_rews.append(ep_rews)
+			batch_rews_decision.append(ep_rews_decision)
 
 		# Reshape data as tensors in the shape specified in function description, before returning
 		batch_obs = torch.tensor(batch_obs, dtype=torch.float)
 		batch_acts = torch.tensor(batch_acts, dtype=torch.float)
 		batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
-		batch_rtgs = self.compute_rtgs(batch_rews)                                                              # ALG STEP 4
+		batch_rtgs = self.compute_rtgs(batch_rews)       # ALG STEP 4
+		batch_membership = torch.tensor(batch_membership, dtype=torch.float)
+		batch_labels = torch.tensor(batch_labels, dtype=torch.float)
 
 		# Log the episodic returns and episodic lengths in this batch.
 		self.logger['batch_rews'] = batch_rews
 		self.logger['batch_lens'] = batch_lens
+		#self.logger['batch_rews_decision'] = batch_rews_decision
 
-		return batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens
+		return (batch_obs,
+				batch_acts,
+				batch_log_probs,
+				batch_rtgs,
+				batch_lens,
+				batch_rews_decision,
+				batch_membership,
+				batch_labels)
+
 
 	def compute_rtgs(self, batch_rews):
 		"""
@@ -272,6 +319,21 @@ class PPO:
 
 		return batch_rtgs
 
+
+	def _sample_ordered(self, dist):
+		x = dist.sample()
+
+		block1 = x[0,:10]
+		block2 = x[0, 10:20]
+		block3 = x[0, 20:30]
+
+		min_gap = 1e-3
+		block2 = torch.clamp(block2, min=block1.max() + min_gap)
+		block3 = torch.clamp(block3, min=block2.max() + min_gap)
+
+		return torch.cat([block1, block2, block3])
+
+
 	def get_action(self, obs):
 		"""
 			Queries an action from the actor network, should be called from rollout.
@@ -292,10 +354,16 @@ class PPO:
 		dist = MultivariateNormal(mean, self.cov_mat)
 
 		# Sample an action from the distribution
-		action = dist.sample()
+		# Se ha limitado entre 0 y 1, pero debido a la prob de la distribución no se asegura que se tenga
+		# un vector ordenado p1<pc<p2
+		action = dist.sample().clamp(min=0.0, max=1.0)
+
+		if (torch.all(action[0,:self.act_dim] > action[0, self.act_dim:2*self.act_dim]) or
+				torch.all(action[0,self.act_dim:2*self.act_dim] > action[0, 2*self.act_dim:3*self.act_dim])):
+			logging.debug("Violación de p1<pc<p2")
 
 		# Calculate the log probability for that action
-		log_prob = dist.log_prob(action)
+		log_prob = dist.log_prob(mean)
 
 		# Return the sampled action and the log probability of that action in our distribution
 		return action.detach().numpy(), log_prob.detach()
@@ -329,6 +397,7 @@ class PPO:
 		# and log probabilities log_probs of each action in the batch
 		return V, log_probs
 
+
 	def _init_hyperparameters(self, hyperparameters):
 		"""
 			Initialize default and custom values for hyperparameters
@@ -342,10 +411,11 @@ class PPO:
 		"""
 		# Initialize default values for hyperparameters
 		# Algorithm hyperparameters
-		self.timesteps_per_batch = 4800                 # Number of timesteps to run per batch
-		self.max_timesteps_per_episode = 1600           # Max number of timesteps per episode
+		self.timesteps_per_batch = 1                    # Number of timesteps to run per batch
+		self.max_timesteps_per_episode = 64             # Max number of timesteps per episode
 		self.n_updates_per_iteration = 5                # Number of times to update actor/critic per iteration
 		self.lr = 0.005                                 # Learning rate of actor optimizer
+		self.decision_lr = 0.005						# Learning rate of decision actor optimizer
 		self.gamma = 0.95                               # Discount factor to be applied when calculating Rewards-To-Go
 		self.clip = 0.2                                 # Recommended 0.2, helps define the threshold to clip the ratio during SGA
 
@@ -391,11 +461,13 @@ class PPO:
 		avg_ep_lens = np.mean(self.logger['batch_lens'])
 		avg_ep_rews = np.mean([np.sum(ep_rews) for ep_rews in self.logger['batch_rews']])
 		avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger['actor_losses']])
+		avg_decision_loss = np.mean([losses.float().mean() for losses in self.logger['decision_actor_losses']])
 
 		# Round decimal places for more aesthetic logging messages
 		avg_ep_lens = str(round(avg_ep_lens, 2))
 		avg_ep_rews = str(round(avg_ep_rews, 2))
 		avg_actor_loss = str(round(avg_actor_loss, 5))
+		avg_decision_loss = str(round(avg_decision_loss, 5))
 
 		# Print logging statements
 		print(flush=True)
@@ -403,6 +475,7 @@ class PPO:
 		print(f"Average Episodic Length: {avg_ep_lens}", flush=True)
 		print(f"Average Episodic Return: {avg_ep_rews}", flush=True)
 		print(f"Average Loss: {avg_actor_loss}", flush=True)
+		print(f"Average Decision Loss: {avg_decision_loss}", flush=True)
 		print(f"Timesteps So Far: {t_so_far}", flush=True)
 		print(f"Iteration took: {delta_t} secs", flush=True)
 		print(f"------------------------------------------------------", flush=True)
@@ -412,50 +485,3 @@ class PPO:
 		self.logger['batch_lens'] = []
 		self.logger['batch_rews'] = []
 		self.logger['actor_losses'] = []
-
-import gymnasium as gym
-
-#env = gym.make('Pendulum-v1')
-#model = PPO(policy_class=FeedForwardNN, critic_class=FeedForwardNN, decision_class=DecisionNN, env=env)
-#model.learn(total_timesteps=10000)
-
-X, y = generar_matriz(num_ejemplos_por_clase=1000, dimensiones=10)
-
-# Convertimos a tensores
-Xt = torch.tensor(X, dtype=torch.float)
-yt = torch.tensor(y, dtype=torch.int)
-# Calcular min y max para normalización min-max (por columna)
-X_min = Xt.min(dim=0, keepdim=True).values
-X_max = yt.max(dim=0, keepdim=True).values
-
-# Dataset personalizado que normaliza en __getitem__
-class NormalizedDataset(Dataset):
-    def __init__(self, X, y, X_min, X_max):
-        self.X = X
-        self.y = y
-        self.X_min = X_min
-        self.X_max = X_max
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        x = self.X[idx]
-        # Aplicar min-max normalización
-        x_norm = (x - self.X_min) / (self.X_max - self.X_min + 1e-8)
-        return x_norm, self.y[idx]
-
-# Crear el dataset y dataloader
-dataset = NormalizedDataset(Xt, yt, X_min, X_max)
-#DataLoader
-dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
-
-gym.register(
-	id="gymnasium_env/circeENV-v0",
-	entry_point="circeENV:TheusEnv",
-	max_episode_steps=300,
-)
-
-env = gym.make('gymnasium_env/circeENV-v0', batch_charact=dataloader)
-model = PPO(policy_class=OrderedOutputNN, critic_class=FeedForwardNN, decision_class=DecisionNN, env=env)
-model.learn(total_timesteps=10000)

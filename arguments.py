@@ -21,6 +21,8 @@ def get_args():
 	parser.add_argument('--mode', dest='mode', type=str, default='train')              # can be 'train' or 'test'
 	parser.add_argument('--actor_model', dest='actor_model', type=str, default='')     # your actor model filename
 	parser.add_argument('--critic_model', dest='critic_model', type=str, default='')   # your critic model filename
+	parser.add_argument('--decision_model', dest='decision_model', type=str, default='')
+	parser.add_argument('--class_dim', dest='class_dim', type=int, default=2)
 
 	args = parser.parse_args()
 
