@@ -180,6 +180,7 @@ class PPO:
 			if i_so_far % self.save_freq == 0:
 				torch.save(self.actor.state_dict(), './ppo_actor.pth')
 				torch.save(self.critic.state_dict(), './ppo_critic.pth')
+				torch.save(self.decision_actor.state_dict(), './ppo_decision.pth')
 
 	def rollout(self):
 		"""
