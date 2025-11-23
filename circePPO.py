@@ -227,7 +227,7 @@ class PPO:
 			done = False
 
 			# Run an episode for a maximum of max_timesteps_per_episode timesteps
-			for ep_t in range(self.max_timesteps_per_episode):
+			for ep_t in range(self.max_timesteps_per_episode-1):
 				# If render is specified, render the environment
 				if self.render and (self.logger['i_so_far'] % self.render_every_i == 0) and len(batch_lens) == 0:
 					self.env.render()
