@@ -1,7 +1,9 @@
 import os
+import platform
 import sys
 import pandas as pd
 import numpy as np
+from sympy.physics.units import planck_area
 
 from arguments import get_args
 import torch
@@ -73,7 +75,8 @@ def train(env,
           actor_model,
           critic_model,
           decision_model,
-          class_dim):
+          class_dim,
+          so):
     print(f"Training...", flush=True)
 
     model = PPO(policy_class=RedOrdenada,
@@ -81,7 +84,9 @@ def train(env,
                 decision_class=DecisionNN,
                 class_dim=class_dim,
                 env=env,
-                **hyperparameters)
+                so=so,
+                **hyperparameters,
+                )
 
     # Tries to load in an existing actor/critic model to continue training on
     if actor_model != '' and critic_model != '' and decision_model != '':
@@ -120,6 +125,8 @@ def test(env, actor_model, class_dim=2):
 
 
 def main(args=None):
+    so = platform.system()
+
     hyperparameters = {
         'batch_size': 64,
         'timesteps_per_batch': 1,
@@ -132,6 +139,7 @@ def main(args=None):
         'render_every_i': 10,
         'save_freq': 10,
     }
+
     result = leer_csv_en_subdirs(ROOT_DIR, SUBDIRS)
     Xt, Yt = juntar_datos(result)
 
@@ -158,7 +166,8 @@ def main(args=None):
               actor_model=args.actor_model,
               critic_model=args.critic_model,
               decision_model=args.decision_model,
-              class_dim=args.class_dim)
+              class_dim=args.class_dim,
+              so=so)
     else:
         test(env,
              actor_model=args.actor_model,

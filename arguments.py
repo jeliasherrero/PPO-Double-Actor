@@ -23,6 +23,8 @@ def get_args():
 	parser.add_argument('--critic_model', dest='critic_model', type=str, default='')   # your critic model filename
 	parser.add_argument('--decision_model', dest='decision_model', type=str, default='')
 	parser.add_argument('--class_dim', dest='class_dim', type=int, default=2)
+	parser.add_argument('--batch_size', dest='batch_size', type=int, default=64)
+	parser.add_argument('--gpu', dest='gpu', type=bool, default=False)
 
 	args = parser.parse_args()
 

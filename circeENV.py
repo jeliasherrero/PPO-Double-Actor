@@ -2,9 +2,18 @@ from typing import Optional
 import numpy as np
 import gymnasium as gym
 
-from torch.optim import Adam
 
 class TheusEnv(gym.Env):
+    """
+    			Class used to simulate the environment of electrical faults in hybrid networks.
+
+    			Parameters:
+    				batch_charact: Database for training (Dataloader).
+    				n_charact: Number of characters used for training.
+
+    			Returns:
+    				None
+    		"""
 
     def __init__(self, batch_charact,
                  n_charact: int=10):
@@ -16,8 +25,6 @@ class TheusEnv(gym.Env):
         if batch_charact:
             self.dataloader = iter(batch_charact)
             self.batch = batch_charact.batch_size
-            #self.batch_charact = batch_charact
-            #self.batch = batch_charact.shape[0]
 
         self.current_data = None
         self.current_batch = None
@@ -25,8 +32,8 @@ class TheusEnv(gym.Env):
 
         self.n_charact = n_charact
 
-        "ACCIONES"
-        " Lo inicializamos a -1"
+        # ACTIONS
+        # Init to -1
         self.p1 = np.full(self.n_charact, -1.0)
         self.pc = np.full(self.n_charact, -1.0)
         self.p2 = np.full(self.n_charact, -1.0)
@@ -40,42 +47,101 @@ class TheusEnv(gym.Env):
             }
         )
 
-        "OBSERVACIONES"
+        # ONSERVATIONS
         self._agent_charact = None
 
         self.n_states = n_charact
         self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(n_charact,), dtype=np.float32)
 
     def get_labels(self):
-        #print(f"Items in batch: {self.current_batch[0].shape} Total: {self.total}")
+        """
+            Gets labels from the database loaded
+
+            Parameters:
+                None
+
+            Returns:
+                Tensor of labels with size (batch,)
+        """
         return self.current_batch[1][self.index_batch]
 
     def _get_obs(self):
-        """ Convertimos estados interno al formato de la observación
-        Devolvemos la observación actual del batch"""
+        """
+            Gets current observation from the database loaded
+
+            Parameters:
+                None
+
+            Returns:
+                Ndarray of observations with size (batch,)
+        """
         self._agent_charact = self.current_batch[0][self.index_batch].detach().numpy()
         return self._agent_charact
 
     def _new_obs(self):
-        """ Devolvemos la observación nueva del batch"""
+        """
+            Gets a new observation from the database loaded, and the index in batch is incremented
+
+            Parameters:
+                None
+
+            Returns:
+                Ndarray of observations with size (batch,)
+        """
         self.index_batch += 1
         self._agent_charact = self.current_batch[0][self.index_batch].detach().numpy()
         return self._agent_charact
 
     def _get_action(self):
+        """
+            Gets the actions as three vector, p1, pc and p2
+
+            Parameters:
+                None
+
+            Returns:
+                Dictionary of vectors p1, pc and p2
+        """
         return {"p1": self.p1, "pc": self.pc, "p2": self.p2}
 
     def _get_info(self):
-        """ Devuelve el valor de la exactitud en labores de debug"""
+        """
+            Gets the performance of the decision process. Just in this version
+
+            Parameters:
+                None
+
+            Returns:
+                Accuracy of the decision process
+        """
         return {
             "accuracy": self._agent_acc,
         }
 
     def get_membership(self):
+        """
+            Gets the membership of the current observation
+
+            Parameters:
+                None
+
+            Returns:
+                Membership of the current observation
+        """
         return self.membership
 
 
     def encoder(self):
+        """
+            Gets the fuzzification of the current observation, and saves it in self.membership
+            as a ndarray
+
+            Parameters:
+                None
+
+            Returns:
+                None
+        """
         """ Codifica cada uno de las características: Fuzzification
         Devuelve:
             np.Array (batch x num characteristics)
@@ -87,7 +153,18 @@ class TheusEnv(gym.Env):
         for c in range(self.n_charact):
             self.membership[c] = trifuzz[c](data[c])
 
+
     def init_rollout(self):
+        """
+            Init the rollout to get the simulation results for each observation.
+            Init the dataloader and reset the value of self.index_batch
+
+            Parameters:
+                None
+
+            Returns:
+                None
+        """
         try:
             self.current_batch = next(self.dataloader)
         except StopIteration:
@@ -97,21 +174,19 @@ class TheusEnv(gym.Env):
 
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
-        """ Comienzo de un nuevo episodio. Almacenamos 
-        Devuelve:
-            Tuple: (Observation, info)
+        """"
+            Fill with ramdom values the vectors p1, pc and p2. Fill the first observation of the batch.
+
+            Parameters:
+                None
+
+            Returns:
+                Returns the first obsrvation and the info (accuracy)
         """
         super().reset(seed=seed)
 
+        # TODO: I am sure if this is needed since it is already done in init_rollout
         self.index_batch = 0
-
-        #self.dataloader = iter(self.dataloader) #reiniciar iterador
-        #self.current_data = next(self.dataloader)
-
-        # Inicializamos el tamaño de los vectores de salida con ceros
-        #self.p1 = np.zeros(self.n_charact)
-        #self.pc = np.zeros(self.n_charact)
-        #self.p2 = np.zeros(self.n_charact)
 
         # Damos valores aleatorios a los vectores de salida asegurando que p1<pc<p2
         for i in range(self.n_charact):
@@ -144,7 +219,7 @@ class TheusEnv(gym.Env):
         return observation, info
 
     def step(self, action):
-        """Execute one timestep within the environment.
+        """Execute one timestep within the environment and gets a new observation of the batch.
 
         Args:
             action: The action to take (p1, pc, p2)

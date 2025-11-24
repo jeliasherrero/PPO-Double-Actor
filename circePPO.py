@@ -20,6 +20,7 @@ class PPO:
 				 decision_class,
 				 class_dim,
 				 env,
+				 so,
 				 **hyperparameters):
 		"""
 			Initializes the PPO model, including hyperparameters.
@@ -43,6 +44,14 @@ class PPO:
 		# Initialize hyperparameters for training with PPO
 		self._init_hyperparameters(hyperparameters)
 
+		self.so = so
+
+		device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+		if self.so == 'Linux':
+			device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+		elif self.so == 'Darwin':
+			device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
 		# Extract environment information
 		self.env = env
 		#self.obs_dim = env.observation_space.shape[0]
@@ -51,7 +60,7 @@ class PPO:
 		self.act_dim = env.action_space['p1'].shape[0]
 
 		# Initialize actor and critic networks
-		self.actor = policy_class(self.obs_dim, self.act_dim)                                                   # ALG STEP 1
+		self.actor = policy_class(self.obs_dim, self.act_dim)             # ALG STEP 1
 		self.critic = critic_class(self.obs_dim, 1)
 
 		# Initialize decision network for clasification
@@ -405,6 +414,7 @@ class PPO:
 		self.decision_lr = 0.005						# Learning rate of decision actor optimizer
 		self.gamma = 0.95                               # Discount factor to be applied when calculating Rewards-To-Go
 		self.clip = 0.2                                 # Recommended 0.2, helps define the threshold to clip the ratio during SGA
+		self.so = "Windows"
 
 		# Miscellaneous parameters
 		self.render = True                              # If we should render during rollout
